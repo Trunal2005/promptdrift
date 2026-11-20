@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from promptdrift.capture.config import CaptureConfig
 from promptdrift.capture.recorder import CaptureRecorder
-from promptdrift.capture.redaction import apply_redaction
+from promptdrift.capture.redaction import RedactionWarning, apply_redaction
 from promptdrift.capture.sampling import should_sample
 from promptdrift.storage.sqlite import (
     count_interactions,
@@ -109,6 +111,24 @@ class TestCaptureRecorderBasic:
         # but must NOT raise
         assert result is None or result is not None
 
+    def test_swallows_unexpected_recorder_exceptions(self, monkeypatch):
+        recorder = CaptureRecorder(CaptureConfig(enabled=True))
+
+        def fail_recording(**_kwargs: object) -> None:
+            raise RuntimeError("capture failed")
+
+        monkeypatch.setattr(recorder, "_record_inner", fail_recording)
+
+        result = recorder.record(
+            prompt="p.txt",
+            input_text="hello",
+            output="world",
+            model="m",
+            provider="mock",
+        )
+
+        assert result is None
+
     def test_system_prompt_recorded(self, tmp_path):
         db = tmp_path / "test.db"
         recorder = CaptureRecorder(CaptureConfig(enabled=True, db_path=db))
@@ -160,6 +180,29 @@ class TestCaptureRecorderRollingCap:
 
 
 class TestCaptureRecorderRedaction:
+    def test_promoted_redaction_warning_propagates_from_record(self, tmp_path):
+        recorder = CaptureRecorder(
+            CaptureConfig(
+                enabled=True,
+                db_path=tmp_path / "test.db",
+                redact_patterns=["[invalid"],
+            )
+        )
+        original_filters = warnings.filters.copy()
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error")
+            with pytest.raises(RedactionWarning, match="invalid redaction pattern"):
+                recorder.record(
+                    prompt="p.txt",
+                    input_text="hello",
+                    output="world",
+                    model="m",
+                    provider="mock",
+                )
+
+        assert warnings.filters == original_filters
+
     def test_email_redaction(self, tmp_path):
         db = tmp_path / "test.db"
         recorder = CaptureRecorder(
@@ -286,10 +329,16 @@ class TestRedaction:
         result = apply_redaction(text, [r"\d{3}-\d{2}-\d{4}"])
         assert "123-45-6789" not in result
 
-    def test_invalid_regex_skipped(self):
-        text = "Hello world"
-        result = apply_redaction(text, ["[invalid"])
-        assert result == "Hello world"
+    def test_invalid_regex_warns_and_continues_with_valid_patterns(self):
+        text = "Email me at user@example.com"
+        with pytest.warns(RedactionWarning) as warning_record:
+            result = apply_redaction(text, ["[invalid", "email"])
+
+        assert isinstance(result, str)
+        assert "user@example.com" not in result
+        assert "[REDACTED]" in result
+        assert "[invalid" in str(warning_record[0].message)
+        assert "unterminated character set" in str(warning_record[0].message)
 
     def test_callback_applied_after_patterns(self):
         def cb(text: str) -> str:
@@ -299,12 +348,29 @@ class TestRedaction:
         assert "foo@example.com" not in result
         assert "bar" in result
 
-    def test_callback_failure_silent(self):
+    def test_callback_failure_warns_and_preserves_text(self):
         def bad_cb(text: str) -> str:
             raise RuntimeError("boom")
 
-        result = apply_redaction("hello", [], bad_cb)
-        assert result == "hello"
+        with pytest.warns(RedactionWarning) as warning_record:
+            result = apply_redaction("Contact user@example.com", ["email"], bad_cb)
+
+        assert isinstance(result, str)
+        assert result == "Contact [REDACTED]"
+        assert str(warning_record[0].message) == "Redaction callback raised RuntimeError: boom"
+
+    def test_redaction_warning_respects_error_filter(self):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error")
+
+            with pytest.raises(RedactionWarning, match="invalid redaction pattern"):
+                apply_redaction("Contact user@example.com", ["[invalid", "email"])
+
+            def bad_cb(text: str) -> str:
+                raise RuntimeError("boom")
+
+            with pytest.raises(RedactionWarning, match="Redaction callback raised RuntimeError"):
+                apply_redaction("hello", [], bad_cb)
 
     def test_empty_text(self):
         assert apply_redaction("", ["email"]) == ""

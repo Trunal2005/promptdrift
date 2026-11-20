@@ -31,7 +31,13 @@ from .errors import (
 )
 from .git import GitContext
 from .models import TestRun
-from .reports import print_impact_report, print_report, write_html_report, write_junit_xml
+from .reports import (
+    print_impact_report,
+    print_report,
+    write_html_report,
+    write_junit_report,
+    write_junit_xml,
+)
 from .storage import (
     add_or_update_scenarios,
     get_interactions,
@@ -216,13 +222,19 @@ def learn(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Turn captured interactions into candidate regression scenarios."""
-    interactions = get_interactions(limit=limit)
+    try:
+        interactions = get_interactions(limit=limit, strict=True)
+    except PromptDriftError as error:
+        _exit_error(error)
     if not interactions:
         console.print("[yellow]No captured interactions found. Use 'promptdrift capture' first.[/]")
         return
 
-    scenarios = discover_scenarios(interactions)
-    add_or_update_scenarios(scenarios)
+    try:
+        scenarios = discover_scenarios(interactions)
+        add_or_update_scenarios(scenarios)
+    except PromptDriftError as error:
+        _exit_error(error)
 
     if json_output:
         typer.echo(json.dumps([s.model_dump() for s in scenarios], indent=2, default=str))
@@ -270,7 +282,10 @@ def suggest(
         console.print(f"[red]Error:[/] Scenario '{scenario_id}' not found.")
         raise typer.Exit(code=2)
 
-    interactions = get_interactions()
+    try:
+        interactions = get_interactions(strict=True)
+    except PromptDriftError as error:
+        _exit_error(error)
     suggestions = suggest_assertions_for_scenario(scenario, interactions)
 
     if json_output:
@@ -292,18 +307,44 @@ def promote(
     ] = False,
 ) -> None:
     """Promote candidate scenarios into committed regression tests."""
-    lib = load_scenarios()
+    try:
+        lib = load_scenarios(strict=True)
+    except PromptDriftError as error:
+        _exit_error(error)
+
+    selected = [
+        scenario
+        for scenario in lib.scenarios
+        if scenario.status == "candidate" and (all_candidates or scenario.id == scenario_id)
+    ]
+
+    if not all_candidates:
+        existing = next(
+            (scenario for scenario in lib.scenarios if scenario.id == scenario_id), None
+        )
+        if existing is None:
+            console.print(f"[red]Error:[/] Scenario '{scenario_id}' not found.")
+            raise typer.Exit(code=2)
+        if existing.status == "ignored":
+            console.print(
+                f"[red]Error:[/] Scenario '{scenario_id}' is ignored and cannot be promoted."
+            )
+            raise typer.Exit(code=2)
+
     promoted_count = 0
-    interactions = get_interactions()
+    try:
+        interactions = get_interactions(strict=True)
+    except PromptDriftError as error:
+        _exit_error(error)
 
-    for sc in lib.scenarios:
-        if all_candidates or sc.id == scenario_id:
-            sc.status = "promoted"
-            if not sc.assertions:
-                sc.assertions = suggest_assertions_for_scenario(sc, interactions)
-            promoted_count += 1
+    for sc in selected:
+        sc.status = "promoted"
+        if not sc.assertions:
+            sc.assertions = suggest_assertions_for_scenario(sc, interactions)
+        promoted_count += 1
 
-    save_scenarios(lib)
+    if promoted_count:
+        save_scenarios(lib)
     console.print(f"[green]Promoted {promoted_count} scenario(s) to active regression suite.[/]")
     console.print(
         "[dim]Commit .promptdrift/scenarios.json to version-control your regression tests.[/]"
@@ -501,12 +542,28 @@ def test(
         Path | None,
         typer.Option("--junit-xml", help="Write a JUnit XML report."),
     ] = None,
+    output_format: Annotated[
+        str, typer.Option("--format", help="Report format: terminal or junit.")
+    ] = "terminal",
+    output: Annotated[
+        Path | None, typer.Option("--output", help="Output path for JUnit XML.")
+    ] = None,
 ) -> None:
     """Run behavioral contracts; automatically compares an existing baseline."""
+    if output_format not in ("terminal", "junit"):
+        raise typer.BadParameter(
+            "Format must be either 'terminal' or 'junit'.",
+            param_hint="--format",
+        )
+
     result = _run(config, with_baseline=True, verbose=verbose)
     if result:
         if junit_xml is not None:
             write_junit_xml(result[2], junit_xml)
+
+        if output_format == "junit":
+            report_path = output or Path("promptdrift-results.xml")
+            write_junit_report(result[2], report_path)
 
         _emit(result[2], json_output)
 
@@ -779,7 +836,11 @@ def monitor(
         )
         if not no_history:
             try:
-                save_monitor_report(report, history_path(config_path))
+                save_monitor_report(
+                    report,
+                    history_path(config_path),
+                    busy_timeout_ms=loaded.storage.busy_timeout_ms,
+                )
             except PromptDriftError as error:
                 report.warnings.append(str(error))
     except (PromptDriftError, OSError, ValueError) as error:
@@ -816,10 +877,18 @@ def history(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Read recent local monitoring reports without calling a provider."""
-    from .storage.history import history_path, load_monitor_history
+    from .storage.history import DEFAULT_BUSY_TIMEOUT_MS, history_path, load_monitor_history
 
     try:
-        runs = load_monitor_history(history_path(config.resolve()), limit=limit)
+        busy_timeout_ms = DEFAULT_BUSY_TIMEOUT_MS
+        if config.is_file():
+            loaded, _ = load_config(config)
+            busy_timeout_ms = loaded.storage.busy_timeout_ms
+        runs = load_monitor_history(
+            history_path(config.resolve()),
+            limit=limit,
+            busy_timeout_ms=busy_timeout_ms,
+        )
     except PromptDriftError as error:
         if json_output:
             typer.echo(

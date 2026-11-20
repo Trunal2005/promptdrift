@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased] — 0.4.0
 
 ### Added
+- SQLite monitoring history now supports WAL mode and configurable
+  `storage.busy_timeout_ms` for improved concurrent access.
 - `monitor`: fresh full-suite repeated probes independent of Git changes, with evidence-based diagnoses and explicit provider-error handling.
 - Provider error taxonomy (`ProviderAuthError`, `ProviderRateLimitError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderResponseError`) normalizing provider exceptions into safe, non-secret diagnostic categories (#14).
 - Schema-v3 baselines with per-case request, generation, provider and contract fingerprints; v1/v2 loading remains supported without invented provenance.
@@ -16,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Optional per-test `request_envelope` (system message, tool schemas, static retrieval context) with credential-stripped, per-component provenance hashes; monitoring evidence names the drifted component.
 - Sampled reference distributions and statistical drift calibration: `promptdrift baseline --samples N` records empirical contract pass rates, latency percentiles, and token averages in `BaselineDistribution`, and `monitor` evaluates probe pass rates against Wilson score confidence intervals to differentiate stochastic noise from model drift (#70).
 - Anthropic provider (`type: anthropic`): Messages API adapter with optional `system` prompt, 429/529 mapped to rate limits, safe error messages, and offline fixtures.
+- `contains_all` and `contains_any` assertions that take a list of substrings (#61).
 
 ### Fixed
 - Isolated tests from the real home directory and working tree.
