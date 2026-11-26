@@ -13,7 +13,8 @@ from promptdrift.engine.baseline import write_baseline
 from promptdrift.engine.monitor import monitor_suite
 from promptdrift.engine.runner import AtomicRequestBudget, run_suite
 from promptdrift.errors import ProviderAuthError, ProviderBudgetExceededError, ProviderTimeoutError
-from promptdrift.models import Config, ProviderConfig, ResilienceConfig, TestCase
+from promptdrift.models import Config, ProviderConfig, ResilienceConfig
+from promptdrift.models import TestCase as DriftTestCase
 from promptdrift.models.config import Defaults
 from promptdrift.models.result import ModelResponse
 from promptdrift.providers.mock import MockProvider
@@ -41,25 +42,29 @@ def test_concurrency_config_validation():
         ResilienceConfig(concurrency=25)
 
 
-@pytest.mark.asyncio
-async def test_mock_provider_acomplete():
-    provider = MockProvider(ProviderConfig(type="mock", model="mock-model"))
-    response = await provider.acomplete("Hello world", temperature=0.7, max_output_tokens=100)
-    assert isinstance(response, ModelResponse)
-    assert response.output == "Hello world"
-    assert response.provider == "mock"
+def test_mock_provider_acomplete():
+    async def _run():
+        provider = MockProvider(ProviderConfig(type="mock", model="mock-model"))
+        response = await provider.acomplete("Hello world", temperature=0.7, max_output_tokens=100)
+        assert isinstance(response, ModelResponse)
+        assert response.output == "Hello world"
+        assert response.provider == "mock"
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_openai_provider_acomplete_auth_error(monkeypatch):
+def test_openai_provider_acomplete_auth_error(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     provider = OpenAIProvider(ProviderConfig(type="openai", model="gpt-4o-mini"))
-    with pytest.raises(ProviderAuthError):
-        await provider.acomplete("Hello", temperature=0.0, max_output_tokens=50)
+
+    async def _run():
+        with pytest.raises(ProviderAuthError):
+            await provider.acomplete("Hello", temperature=0.0, max_output_tokens=50)
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_openai_provider_acomplete_mocked_transport(monkeypatch):
+def test_openai_provider_acomplete_mocked_transport(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-mock")
 
     async def mock_handler(request: httpx.Request) -> httpx.Response:
@@ -75,16 +80,20 @@ async def test_openai_provider_acomplete_mocked_transport(monkeypatch):
     transport = httpx.MockTransport(mock_handler)
     provider = OpenAIProvider(ProviderConfig(type="openai", model="gpt-4o-mini"))
 
-    with patch("httpx.AsyncClient", return_value=httpx.AsyncClient(transport=transport)):
-        response = await provider.acomplete("Test prompt", temperature=0.0, max_output_tokens=50)
-        assert response.output == "Async hello world"
-        assert response.provider == "openai"
-        assert response.input_tokens == 5
-        assert response.output_tokens == 3
+    async def _run():
+        with patch("httpx.AsyncClient", return_value=httpx.AsyncClient(transport=transport)):
+            response = await provider.acomplete(
+                "Test prompt", temperature=0.0, max_output_tokens=50
+            )
+            assert response.output == "Async hello world"
+            assert response.provider == "openai"
+            assert response.input_tokens == 5
+            assert response.output_tokens == 3
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_resilience_executor_aexecute_retry():
+def test_resilience_executor_aexecute_retry():
     config = ResilienceConfig(max_retries=2, initial_backoff=0.01)
     executor = ResilienceExecutor(config, provider_name="TestProvider")
 
@@ -104,13 +113,15 @@ async def test_resilience_executor_aexecute_retry():
             output_tokens=1,
         )
 
-    res = await executor.aexecute(transient_fn)
-    assert res.output == "Success"
-    assert attempts == 2
+    async def _run():
+        res = await executor.aexecute(transient_fn)
+        assert res.output == "Success"
+        assert attempts == 2
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_resilience_executor_aexecute_timeout_budget():
+def test_resilience_executor_aexecute_timeout_budget():
     config = ResilienceConfig(timeout_budget=0.05, max_retries=3, initial_backoff=0.1)
     executor = ResilienceExecutor(config, provider_name="TestProvider")
 
@@ -118,22 +129,27 @@ async def test_resilience_executor_aexecute_timeout_budget():
         await asyncio.sleep(0.06)
         raise httpx.TransportError("Network glitch")
 
-    with pytest.raises(ProviderTimeoutError):
-        await executor.aexecute(slow_failing)
+    async def _run():
+        with pytest.raises(ProviderTimeoutError):
+            await executor.aexecute(slow_failing)
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_atomic_request_budget():
-    budget = AtomicRequestBudget(limit=3)
+def test_atomic_request_budget():
+    async def _run():
+        budget = AtomicRequestBudget(limit=3)
 
-    # 3 acquires succeed
-    await budget.acquire()
-    await budget.acquire()
-    await budget.acquire()
-
-    # 4th acquire raises
-    with pytest.raises(ProviderBudgetExceededError):
+        # 3 acquires succeed
         await budget.acquire()
+        await budget.acquire()
+        await budget.acquire()
+
+        # 4th acquire raises
+        with pytest.raises(ProviderBudgetExceededError):
+            await budget.acquire()
+
+    asyncio.run(_run())
 
 
 def test_run_suite_concurrent_execution(tmp_path):
@@ -141,7 +157,7 @@ def test_run_suite_concurrent_execution(tmp_path):
     prompt_file.write_text("Echo {{ value }}", encoding="utf-8")
 
     tests = [
-        TestCase(id=f"test-{i}", prompt=str(prompt_file), variables={"value": f"val-{i}"})
+        DriftTestCase(id=f"test-{i}", prompt=str(prompt_file), variables={"value": f"val-{i}"})
         for i in range(10)
     ]
 
@@ -169,7 +185,7 @@ def test_run_suite_concurrent_request_budget_exceeded(tmp_path):
     prompt_file.write_text("Echo {{ value }}", encoding="utf-8")
 
     tests = [
-        TestCase(id=f"test-{i}", prompt=str(prompt_file), variables={"value": f"val-{i}"})
+        DriftTestCase(id=f"test-{i}", prompt=str(prompt_file), variables={"value": f"val-{i}"})
         for i in range(5)
     ]
 
@@ -192,7 +208,7 @@ def test_monitor_suite_concurrent_execution(tmp_path):
     prompt_file.write_text("Monitor prompt {{ id }}", encoding="utf-8")
 
     tests = [
-        TestCase(
+        DriftTestCase(
             id=f"test-{i}",
             prompt="prompt.txt",
             variables={"id": str(i)},
